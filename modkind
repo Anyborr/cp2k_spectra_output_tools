@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+
+
+"""
+Summary
+------
+S| This script enables manipulation of .xyz trajectory files.
+S|
+S| Its primary use is to easily change the KIND of atoms so they
+S| can be treated by specific basis sets and/or pseudopotential
+S| combinations.
+S|
+S| The script functionality has since been expanded to allow for
+S| manipulating the position and trajectories of the atoms
+S| in the (as of now cubic) periodic simulation box to simplify
+S| analysis (e.g. displaying .cube files).
+
+
+Usage
+------
+U| Atoms are selected by index in the first snapshot in the .xyz
+U| trajectory file. One Specifies which atoms to treat by
+U| -nr <s..f> where s and f are the start and finish indexes of 
+U| range of atoms. The lists of KINDS specified by the source 
+U| and target flags then determines which atom indexes will have
+U| their source KINDS updated to those contained in the target list.
+U| 
+U| Example:
+U| -nr 1..5 -s H O -t H1 O1
+U| The above flags will replace any H and O KINDS with H1 and O1
+U| respectively, for the first 5 atoms in all snapshots of the 
+U| input trajectory.
+
+"""
+
+
+import sys
+import os
+import argparse
+import math
+
+
+## INFORMATION ##
+
+# ***
+# Script written by André Nyberg Borrfors (2023)
+# Note that this script only works for .xyz trajectory files.
+# **
+
+
+
+
+parser = argparse.ArgumentParser(usage=__doc__)
+
+# Possible Input Parameters
+parser.add_argument("-i", metavar="input", dest="input_file", \
+                    help="name of input file", \
+                    type=str, required=True)
+
+parser.add_argument("-o", metavar="output", dest="output_file", \
+                    help="name of output file", \
+                    type=str, required=False)
+
+parser.add_argument("-nr",metavar="number", dest="old_kind_index", \
+                    help="atom index of form [index{..index_end}]. First atom has index 1", \
+                    type=str, required=False)
+
+parser.add_argument("-s", metavar="source", dest="old_kind",\
+                    help="old kinds to be replaced by new kind", \
+                    type=str, nargs='*', required=False)
+
+parser.add_argument("-t", metavar="target", dest="new_kind", \
+                    help="new kinds. Will replace the old kind in order old[k] -> new[k]", \
+                    type=str, nargs='*', required=False)
+
+parser.add_argument("-c", metavar="cube side", dest="cube_side_length", \
+                    help="length of (cube, a=b=c) box side. All atoms will be wrapped into the cell", \
+                    type=float, required=False)
+
+parser.add_argument("-m", metavar="", dest="displace", \
+                    help="translates all atoms by vector [X Y Z]. Usage: '-m <X> <Y> <Z>'. If used with -c atoms are confined within the specified box", \
+                    type=float, nargs=3, default=[0.0,0.0,0.0], required=False)
+
+parser.add_argument("-d", dest="traj_consistent", \
+                    help="keeps individual atom trajectories connected when passing outside simulation box. The initial snapshot will still be wrapped into the cell.", \
+                    action="store_true", required=False)
+
+parser.add_argument("-q", dest="quiet", \
+                    help="quiets printing of diagnostics to stderr", \
+                    action="store_true", required=False)
+
+
+args = parser.parse_args()
+
+input_file = args.input_file
+output_file = args.output_file
+old_kind = args.old_kind
+new_kind = args.new_kind
+cube_length = args.cube_side_length
+old_index = args.old_kind_index
+move_atoms = args.displace
+
+# If an index is supplied, test its validity
+if args.old_kind_index:
+    try:
+        #if only one nr supplied, try to make list [idx, idx]
+        old_kind_index = [int(old_index), int(old_index)]
+    except:
+        #if that doesnt work, try to split with delimiter and see if we get 2 values
+        try:
+            old_index = old_index.split('..')
+            if len(old_index) == 2:
+                old_kind_index =  [int(old_index[0]), int(old_index[1])]
+            else:
+                raise ValueError('index parameter format is wrong!')
+        except:
+            print('index must be lone integer or a range indexStart..indexEnd')
+            sys.exit()
+	
+    # sub 1 from values in index list to conform with python indexing
+    old_kind_index = [x-1 for x in old_kind_index]
+            
+####################################################################
+####################################################################
+####################################################################
+        
+with open(input_file, "r") as myInput:
+    with open('tmpFile', "w") as myOutput: #change script to use tmp output file.
+        lineNr         = 0
+        snapshotNr     = 0
+        nrChangedIndex = 0
+        skipRow        = False
+        
+        for line in myInput:
+            
+            lineNr += 1
+
+            # This should only skip the comment line of each snapshot
+            if skipRow == True:
+                skipRow = False
+                myOutput.write(line)
+                continue
+            
+            parts = line.split()
+
+            # identify number of atoms and use as separator
+            # This will only be run once.
+            if lineNr == 1 and parts[0].isdigit() and len(parts) == 1:
+                separator = parts[0]
+                nrOfAtoms = int(parts[0])
+                pbcDisp = [None]*nrOfAtoms
+
+            
+            # identifies start of each atom coordinate section
+            if len(parts) == 1 and parts[0] == separator:
+                snapshotNr  += 1
+                atomIndex    = 0
+                skipRow      = True
+                myOutput.write(line)
+                continue
+
+            
+            # modify atoms if right condition detected
+            if atomIndex < nrOfAtoms:
+                if args.old_kind and args.new_kind and args.old_kind_index:
+                    if atomIndex in range(old_kind_index[0], old_kind_index[1]+1) and parts[0] in old_kind:
+                        kind_id = old_kind.index(parts[0])
+                        parts[0] = new_kind[kind_id]
+                        nrChangedIndex += 1
+                atomIndex += 1
+
+                #make coords floats and translate all atoms by vector if using -m flag
+                parts = [str(parts[0]), float(parts[1])+move_atoms[0], float(parts[2])+move_atoms[1], float(parts[3])+move_atoms[2]]
+                
+                #move all atoms in to box each snapshot (produces disconnected atomic trajs if they go outside box)
+                if args.cube_side_length and not args.traj_consistent:
+                    line = [parts[0], parts[1]%cube_length, parts[2]%cube_length, parts[3]%cube_length]
+
+                #move atoms into box at start of traj then let them move freely (continuous atomic trajs even if they leave box)
+                elif args.cube_side_length and args.traj_consistent:
+                    if snapshotNr == 1:
+                        pbcDisp[atomIndex-1] = [math.floor(x/cube_length)*cube_length for x in parts[1:]]
+                    line = [parts[0], float(parts[1])-pbcDisp[atomIndex-1][0], float(parts[2])-pbcDisp[atomIndex-1][1], \
+                            float(parts[3])-pbcDisp[atomIndex-1][2]]
+                    
+                else: #leave original traj intact
+                    line = [parts[0], float(parts[1]), float(parts[2]), float(parts[3])]
+                    
+                myOutput.write('%3s %20.10f %19.10f %19.10f \n' % (line[0], line[1], line[2], line[3]))
+                continue
+                    
+                
+            print('-- EXITING PARAMETERS --', file=sys.stderr)
+            print('Detected nr of Atoms: '+str(nrOfAtoms), file=sys.stderr)
+            print("Atom Indexes  :"+str(old_kind_index[0])+'  '+str(old_kind_index[1]), file=sys.stderr)
+            print("", file=sys.stderr)
+            print('Line Number: '+str(lineNr), file=sys.stderr)
+            print('First part of current Line: '+str(parts[0]), file=sys.stderr)
+            print('Current snapshot: '+str(snapshotNr), file=sys.stderr)
+            print('Current Atom Index: '+str(atomIndex), file=sys.stderr)
+            print('', file=sys.stderr)
+            # if this error is reached something is likely wrong with the trajectory file.
+            errmsg = "something wrong with input file. Make sure it starts with the correct nr of atoms as integer!"
+            raise ValueError(errmsg, file = sys.stderr)
+
+
+if args.output_file:
+    os.system('mv tmpFile '+output_file)
+else:
+    os.system("cat tmpFile")
+    os.system("rm tmpFile")
+
+if args.quiet == False:
+    print('\n** Transformation appears successful! \nMake sure to double-check new file for errors.',file=sys.stderr)
+    print('** Processed nr of lines in input file: '+str(lineNr), file=sys.stderr)
+    print('** Processed nr of snapshots: '+str(snapshotNr), file=sys.stderr)
+    print('** Detected number of atoms per snapshot: '+str(nrOfAtoms), file=sys.stderr)
+    print('** Total nr of changed indexes in trajectory: '+str(nrChangedIndex), file=sys.stderr)
+    print('')
