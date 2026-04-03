@@ -232,31 +232,35 @@ def do_fft_ND(time_array, signals, padding_mult=None, window_type=None):
     return frequency, arr_fft
 
 
-def rtp_generate_spectrum(time_array, signals, fields, window_type, mode, padding_mult=4):
+def rtp_generate_spectrum(time_array, signals, fields=None, window_type=None, mode=None, padding_mult=None):
     # Make sure we are working in R3
-    if not len(signals) == len(fields) == 3:
-        raise ValueError('Dimension of the signal arrays must be 3!')
+    if len(signals) != 3 or (fields is not None and len(fields) != 3):
+        raise ValueError('Dimension of the signal and/or fields arrays must be 3!')
     # Constants
     h_over_e = 4.135667696  # Planck's constant over elementary charge in eV·fs
     speed_of_light = 299792458  # Speed of light in m/s
 
     # high resolution FFT of our signals
-    # padding=4  # padding multiplier, larger -> higher fft resolution
+    # # padding multiplier, larger -> artifically increases fft resolution
     freq_fs, fft_signals = do_fft_ND(time_array, signals, padding_mult, window_type)
-    _, fft_fields = do_fft_ND(time_array, fields, padding_mult)
+    
+    if fields is not None:
+        _, fft_fields = do_fft_ND(time_array, fields, padding_mult)
 
-    # We assume imaginary component of fft_fields are very small and can be discarded
-    for idx in range(3):        
-        ## TODO: review if we want to divide by the full complex fft_fields
-        ## (see https://pubs.acs.org/doi/10.1021/acs.jctc.6b00511 equation [9] )
-        field_mod = fft_fields[idx].real**2 + fft_fields[idx].imag**2
-        field_conj = np.conj(fft_fields[idx])
-        fft_fields[idx] = field_mod / field_conj
+        # Here we shift the signal based on the applied field so they end up in the
+        # correct parts of the FFT output
+        for idx in range(3):        
+            ## TODO: review if we want to divide by the full complex fft_fields
+            ## (see https://pubs.acs.org/doi/10.1021/acs.jctc.6b00511 equation [9] )
+            field_mod = fft_fields[idx].real**2 + fft_fields[idx].imag**2
+            field_conj = np.conj(fft_fields[idx])
+            fft_fields[idx] = field_mod / field_conj
+            fft_signals[idx] /= fft_fields[idx]
 
     # Compute the field-scaled trace of the FFT output
-    fft_trace = 0
+    fft_trace = np.zeros(len(fft_signals[0]), dtype=np.complex128)  # fft_trace = 0
     for idx in range(3):
-        fft_trace += fft_signals[idx] / fft_fields[idx]
+        fft_trace += fft_signals[idx] # / fft_fields[idx]
 
         
     # # We assume imaginary component of fft_fields are very small and can be discarded
@@ -277,24 +281,27 @@ def rtp_generate_spectrum(time_array, signals, fields, window_type, mode, paddin
     freq_idx = freq_eV > 0
     freq_eV = freq_eV[freq_idx]
     # [WARNING] multiply by `1j` is a hack !! not sure why this works??
-    fft_trace = fft_trace[freq_idx]*1j
+    fft_trace = fft_trace[freq_idx]#*1j
     
     match mode:
         case 'dipole':
             # Scaling
             numer = 4*np.pi
             denom = 3*speed_of_light
-            prefactor = numer/denom
+            prefactor = 1 #numer/denom
             # Compute absorption
-            absorption = prefactor * fft_trace.imag * freq_eV
+            absorption = prefactor * fft_trace.imag# * freq_eV
             
         case 'current':
             # Currently the correct scaling for the macroscopic current density as printed from CP2K is missing,
             # therefore we obtain higher magnitude scaling for the current than the dipole moment abs spectrum.
             # Scaling
-            prefactor = 4*np.pi
+            prefactor = 1 #4*np.pi
             # Compute absorption
-            absorption = prefactor * fft_trace.real / freq_eV
+            absorption = prefactor * fft_trace.real# / freq_eV
+
+        case _:
+            raise TypeError('You need to specify the source of your signal (dipole / current suppported)')
     
     return freq_eV, absorption
 
